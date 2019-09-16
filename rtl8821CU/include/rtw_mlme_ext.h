@@ -276,6 +276,10 @@ enum TDLS_option {
 
 #endif /* CONFIG_TDLS */
 
+#ifndef NL80211_AUTHTYPE_SAE
+#define NL80211_AUTHTYPE_SAE 4
+#endif
+
 /*
  * Usage:
  * When one iface acted as AP mode and the other iface is STA mode and scanning,
@@ -355,6 +359,11 @@ struct mlme_ext_info {
 	struct HT_caps_element	HT_caps;
 	struct HT_info_element		HT_info;
 	WLAN_BSSID_EX			network;/* join network or bss_network, if in ap mode, it is the same to cur_network.network */
+#ifdef ROKU_PRIVATE
+	/*infra mode, store supported rates from AssocRsp*/
+	NDIS_802_11_RATES_EX	SupportedRates_infra_ap;
+	u8 ht_vht_received;/*ht_vht_received used to show debug msg BIT(0):HT BIT(1):VHT */
+#endif /* ROKU_PRIVATE */
 };
 
 /* The channel information about this channel including joining, scanning, and power constraints. */
@@ -373,20 +382,13 @@ typedef struct _RT_CHANNEL_INFO {
 	#endif
 	u8 hidden_bss_cnt; /* per scan count */
 #endif
-
-#ifdef CONFIG_RTW_MESH
-	#if CONFIG_RTW_MESH_OFFCH_CAND
-	u8 mesh_candidate_cnt; /* update at scan done for specific mesh iface */
-	#endif
-#endif /* CONFIG_RTW_MESH */
 } RT_CHANNEL_INFO, *PRT_CHANNEL_INFO;
 
-#define RTW_RADAR_DETECT_TIMER_MS 100
 #define CAC_TIME_MS (60*1000)
 #define CAC_TIME_CE_MS (10*60*1000)
 #define NON_OCP_TIME_MS (30*60*1000)
 
-#ifdef CONFIG_TXPWR_LIMIT
+#if CONFIG_TXPWR_LIMIT
 void rtw_txpwr_init_regd(struct rf_ctl_t *rfctl);
 #endif
 void rtw_rfctl_init(_adapter *adapter);
@@ -524,18 +526,16 @@ struct mlme_ext_priv {
 	u32	retry; /* retry for issue probereq */
 
 	u64 TSFValue;
-
-#ifdef DBG_RX_BCN
-	/* for LPS-32K to adaptive bcn early and timeout */
-	u8 adaptive_tsf_done;
-	u32 bcn_delay_cnt[9];
-	u32 bcn_delay_ratio[9];
 	u32 bcn_cnt;
-	u32 cur_bcn_cnt;
-	u8 DrvBcnEarly;
-	u8 DrvBcnTimeOut;
+	u32 last_bcn_cnt;
+	u8 cur_bcn_cnt;/*2s*/
+	u8 dtim;/*DTIM Period*/
+#ifdef DBG_RX_BCN
+	u8 tim[4];
 #endif
-
+#ifdef CONFIG_BCN_RECV_TIME
+	u16 bcn_rx_time;
+#endif
 #ifdef CONFIG_AP_MODE
 	unsigned char bstart_bss;
 #endif
@@ -559,6 +559,28 @@ struct mlme_ext_priv {
 	systime tsf_update_pause_stime;
 	u8 tsf_update_pause_factor; /* num of bcn intervals to stay TSF update pause status */
 	u8 tsf_update_restore_factor; /* num of bcn interval to stay TSF update restore status */
+#ifdef CONFIG_SUPPORT_STATIC_SMPS
+	u8 ssmps_en;
+	u16 ssmps_tx_tp_th;/*Mbps*/
+	u16 ssmps_rx_tp_th;/*Mbps*/
+	#ifdef DBG_STATIC_SMPS
+	u8 ssmps_test;
+	u8 ssmps_test_en;
+	#endif
+#endif
+#ifdef CONFIG_CTRL_TXSS_BY_TP
+	u8 txss_ctrl_en;
+	u16 txss_tp_th;/*Mbps*/
+	u8 txss_tp_chk_cnt;/*unit 2s*/
+	bool txss_1ss;
+	u8 txss_momi_type_bk;
+#endif
+};
+
+struct support_rate_handler {
+	u8 rate;
+	bool basic;
+	bool existence;
 };
 
 static inline u8 check_mlmeinfo_state(struct mlme_ext_priv *plmeext, sint state)
@@ -661,6 +683,8 @@ void change_band_update_ie(_adapter *padapter, WLAN_BSSID_EX *pnetwork, u8 ch);
 
 void Set_MSR(_adapter *padapter, u8 type);
 
+void rtw_set_external_auth_status(_adapter *padapter, const void *data, int len);
+
 u8 rtw_get_oper_ch(_adapter *adapter);
 void rtw_set_oper_ch(_adapter *adapter, u8 ch);
 u8 rtw_get_oper_bw(_adapter *adapter);
@@ -692,7 +716,6 @@ void write_cam_cache(_adapter *adapter, u8 id, u16 ctrl, u8 *mac, u8 *key);
 void clear_cam_cache(_adapter *adapter, u8 id);
 
 void invalidate_cam_all(_adapter *padapter);
-void CAM_empty_entry(PADAPTER Adapter, u8 ucIndex);
 
 void flush_all_cam_entry(_adapter *padapter);
 
@@ -711,6 +734,9 @@ int is_IBSS_empty(_adapter *padapter);
 
 unsigned char check_assoc_AP(u8 *pframe, uint len);
 void get_assoc_AP_Vendor(char *vendor, u8 assoc_AP_vendor);
+#ifdef CONFIG_RTS_FULL_BW
+void rtw_parse_sta_vendor_ie_8812(_adapter *adapter, struct sta_info *sta, u8 *tlv_ies, u16 tlv_ies_len);
+#endif/*CONFIG_RTS_FULL_BW*/
 #ifdef CONFIG_80211AC_VHT
 unsigned char get_vht_mu_bfer_cap(u8 *pframe, uint len);
 #endif
@@ -723,17 +749,28 @@ void rtw_process_wfd_ies(_adapter *adapter, u8 *ies, u8 ies_len, const char *tag
 void WMMOnAssocRsp(_adapter *padapter);
 
 void HT_caps_handler(_adapter *padapter, PNDIS_802_11_VARIABLE_IEs pIE);
+#ifdef ROKU_PRIVATE
+void HT_caps_handler_infra_ap(_adapter *padapter, PNDIS_802_11_VARIABLE_IEs pIE);
+#endif
 void HT_info_handler(_adapter *padapter, PNDIS_802_11_VARIABLE_IEs pIE);
 void HTOnAssocRsp(_adapter *padapter);
+
+#ifdef ROKU_PRIVATE
+void Supported_rate_infra_ap(_adapter *padapter, PNDIS_802_11_VARIABLE_IEs pIE);
+void Extended_Supported_rate_infra_ap(_adapter *padapter, PNDIS_802_11_VARIABLE_IEs pIE);
+#endif
 
 void ERP_IE_handler(_adapter *padapter, PNDIS_802_11_VARIABLE_IEs pIE);
 void VCS_update(_adapter *padapter, struct sta_info *psta);
 void	update_ldpc_stbc_cap(struct sta_info *psta);
 
+bool rtw_validate_value(u16 EID, u8 *p, u16 len);
+bool hidden_ssid_ap(WLAN_BSSID_EX *snetwork);
+void rtw_absorb_ssid_ifneed(_adapter *padapter, WLAN_BSSID_EX *bssid, u8 *pframe);
 int rtw_get_bcn_keys(ADAPTER *Adapter, u8 *pframe, u32 packet_len,
 		struct beacon_keys *recv_beacon);
 int validate_beacon_len(u8 *pframe, uint len);
-void rtw_dump_bcn_keys(struct beacon_keys *recv_beacon);
+void rtw_dump_bcn_keys(void *sel, struct beacon_keys *recv_beacon);
 int rtw_check_bcn_info(ADAPTER *Adapter, u8 *pframe, u32 packet_len);
 void update_beacon_info(_adapter *padapter, u8 *pframe, uint len, struct sta_info *psta);
 #ifdef CONFIG_DFS
@@ -762,6 +799,8 @@ int support_short_GI(_adapter *padapter, struct HT_caps_element *pHT_caps, u8 bw
 unsigned int is_ap_in_tkip(_adapter *padapter);
 unsigned int is_ap_in_wep(_adapter *padapter);
 unsigned int should_forbid_n_rate(_adapter *padapter);
+
+void parsing_eapol_packet(_adapter *padapter, u8 *key_payload, struct sta_info *psta, u8 trx_type);
 
 bool _rtw_camctl_chk_cap(_adapter *adapter, u8 cap);
 void _rtw_camctl_set_flags(_adapter *adapter, u32 flags);
@@ -795,17 +834,23 @@ s8 rtw_macid_get_ch_g(struct macid_ctl_t *macid_ctl, u8 id);
 void rtw_alloc_macid(_adapter *padapter, struct sta_info *psta);
 void rtw_release_macid(_adapter *padapter, struct sta_info *psta);
 u8 rtw_search_max_mac_id(_adapter *padapter);
-void rtw_macid_ctl_set_h2c_msr(struct macid_ctl_t *macid_ctl, u8 id, u8 h2c_msr);
+u8 rtw_macid_ctl_set_h2c_msr(struct macid_ctl_t *macid_ctl, u8 id, u8 h2c_msr);
 void rtw_macid_ctl_set_bw(struct macid_ctl_t *macid_ctl, u8 id, u8 bw);
 void rtw_macid_ctl_set_vht_en(struct macid_ctl_t *macid_ctl, u8 id, u8 en);
 void rtw_macid_ctl_set_rate_bmp0(struct macid_ctl_t *macid_ctl, u8 id, u32 bmp);
 void rtw_macid_ctl_set_rate_bmp1(struct macid_ctl_t *macid_ctl, u8 id, u32 bmp);
+#ifdef CONFIG_PROTSEL_MACSLEEP
+void rtw_macid_ctl_init_sleep_reg(struct macid_ctl_t *macid_ctl, u16 reg_ctrl, u16 reg_info);
+#else
 void rtw_macid_ctl_init_sleep_reg(struct macid_ctl_t *macid_ctl, u16 m0, u16 m1, u16 m2, u16 m3);
+#endif
 void rtw_macid_ctl_init(struct macid_ctl_t *macid_ctl);
 void rtw_macid_ctl_deinit(struct macid_ctl_t *macid_ctl);
 u8 rtw_iface_bcmc_id_get(_adapter *padapter);
 void rtw_iface_bcmc_id_set(_adapter *padapter, u8 mac_id);
-
+#if defined(DBG_CONFIG_ERROR_RESET) && defined(CONFIG_CONCURRENT_MODE)
+void rtw_iface_bcmc_sec_cam_map_restore(_adapter *adapter);
+#endif
 bool rtw_bmp_is_set(const u8 *bmp, u8 bmp_len, u8 id);
 void rtw_bmp_set(u8 *bmp, u8 bmp_len, u8 id);
 void rtw_bmp_clear(u8 *bmp, u8 bmp_len, u8 id);
@@ -830,7 +875,7 @@ void report_wmm_edca_update(_adapter *padapter);
 
 void beacon_timing_control(_adapter *padapter);
 u8 chk_bmc_sleepq_cmd(_adapter *padapter);
-extern u8 set_tx_beacon_cmd(_adapter *padapter);
+extern u8 set_tx_beacon_cmd(_adapter *padapter, u8 flags);
 unsigned int setup_beacon_frame(_adapter *padapter, unsigned char *beacon_frame);
 void update_mgnt_tx_rate(_adapter *padapter, u8 rate);
 void update_monitor_frame_attrib(_adapter *padapter, struct pkt_attrib *pattrib);
@@ -971,7 +1016,13 @@ void mlmeext_joinbss_event_callback(_adapter *padapter, int join_res);
 void mlmeext_sta_del_event_callback(_adapter *padapter);
 void mlmeext_sta_add_event_callback(_adapter *padapter, struct sta_info *psta);
 
+int rtw_get_rx_chk_limit(_adapter *adapter);
+void rtw_set_rx_chk_limit(_adapter *adapter, int limit);
 void linked_status_chk(_adapter *padapter, u8 from_timer);
+
+#define rtw_get_bcn_cnt(adapter)	(adapter->mlmeextpriv.cur_bcn_cnt)
+#define rtw_get_bcn_dtim_period(adapter)	(adapter->mlmeextpriv.dtim)
+void rtw_collect_bcn_info(_adapter *adapter);
 
 void _linked_info_dump(_adapter *padapter);
 
@@ -1001,6 +1052,8 @@ void reassoc_timer_hdl(_adapter *padapter);
 		_set_timer(&(mlmeext)->link_timer, (ms)); \
 	} while (0)
 
+bool rtw_is_cck_rate(u8 rate);
+bool rtw_is_ofdm_rate(u8 rate);
 bool rtw_is_basic_rate_cck(u8 rate);
 bool rtw_is_basic_rate_ofdm(u8 rate);
 bool rtw_is_basic_rate_mix(u8 rate);
@@ -1012,8 +1065,8 @@ extern void process_addba_req(_adapter *padapter, u8 *paddba_req, u8 *addr);
 
 extern void update_TSF(struct mlme_ext_priv *pmlmeext, u8 *pframe, uint len);
 extern void correct_TSF(_adapter *padapter, u8 mlme_state);
-#ifdef DBG_RX_BCN
-extern void adaptive_early_32k(struct mlme_ext_priv *pmlmeext, u8 *pframe, uint len);
+#ifdef CONFIG_BCN_RECV_TIME
+void rtw_rx_bcn_time_update(_adapter *adapter, uint bcn_len, u8 data_rate);
 #endif
 extern u8 traffic_status_watchdog(_adapter *padapter, u8 from_timer);
 
@@ -1048,6 +1101,9 @@ u8 NULL_hdl(_adapter *padapter, u8 *pbuf);
 u8 join_cmd_hdl(_adapter *padapter, u8 *pbuf);
 u8 disconnect_hdl(_adapter *padapter, u8 *pbuf);
 u8 createbss_hdl(_adapter *padapter, u8 *pbuf);
+#ifdef CONFIG_AP_MODE
+u8 stop_ap_hdl(_adapter *adapter);
+#endif
 u8 setopmode_hdl(_adapter *padapter, u8 *pbuf);
 u8 sitesurvey_cmd_hdl(_adapter *padapter, u8 *pbuf);
 u8 setauth_hdl(_adapter *padapter, u8 *pbuf);
@@ -1071,6 +1127,8 @@ u8 set_csa_hdl(_adapter *padapter, unsigned char *pbuf);	/* Kurt: Handling DFS c
 u8 tdls_hdl(_adapter *padapter, unsigned char *pbuf);
 u8 run_in_thread_hdl(_adapter *padapter, u8 *pbuf);
 u8 rtw_getmacreg_hdl(_adapter *padapter, u8 *pbuf);
+
+int rtw_sae_preprocess(_adapter *adapter, const u8 *buf, u32 len, u8 tx);
 
 #define GEN_DRV_CMD_HANDLER(size, cmd)	{size, &cmd ## _hdl},
 #define GEN_MLME_EXT_HANDLER(size, cmd)	{size, cmd},
